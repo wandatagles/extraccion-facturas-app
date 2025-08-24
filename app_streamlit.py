@@ -21,8 +21,16 @@ import traceback
 try:
     from config import Config, get_pdf_files_from_directory
     from llm_whisperer_wrapper import LLMWhispererClient  
-    from agents_system import TableExtractionAgent
-    st.success("✅ Módulos locales importados correctamente")
+    
+    # Intentar usar la versión simplificada primero (sin CrewAI)
+    try:
+        from agents_system_simple import SimpleTableExtractionAgent as TableExtractionAgent
+        st.success("✅ Módulos locales importados (versión simplificada sin CrewAI)")
+    except ImportError:
+        # Fallback a la versión con CrewAI si está disponible
+        from agents_system import TableExtractionAgent
+        st.success("✅ Módulos locales importados (versión con CrewAI)")
+        
 except Exception as e:
     st.error(f"❌ Error importando módulos: {e}")
     st.stop()
