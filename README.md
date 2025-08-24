@@ -1,2 +1,26 @@
-# extraccion-facturas-app
-Aplicación web para extraer datos de facturas eléctricas panameñas
+# 🚀 Aplicación de Extracción de Facturas Eléctricas
+
+Aplicación web para extraer y estructurar datos de facturas eléctricas panameñas usando IA.
+
+## 🌟 Características
+
+- ✅ Subida de PDF individual o múltiples
+- ✅ Extracción automática con LLM Whisperer
+- ✅ Procesamiento inteligente con OpenAI
+- ✅ Exportación a Excel estructurado
+- ✅ Interfaz web moderna
+
+## 🚀 Demo en Vivo
+
+[Ver aplicación funcionando](URL_SERA_GENERADA_AUTOMATICAMENTE)
+
+## 🛠️ Tecnologías
+
+- **Frontend**: Streamlit
+- **IA**: OpenAI GPT + CrewAI
+- **OCR**: LLM Whisperer
+- **Export**: Pandas + Excel
+
+## 📧 Contacto
+
+Desarrollado para procesamiento automático de facturas eléctricas.

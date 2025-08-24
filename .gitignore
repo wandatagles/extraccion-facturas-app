@@ -1,0 +1,33 @@
+# Environment variables (NUNCA subir claves)
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Data files (no subir PDFs ni resultados)
+*.pdf
+*.xlsx
+*.json
+*.txt
+!requirements.txt
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
