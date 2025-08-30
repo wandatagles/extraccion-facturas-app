@@ -1,6 +1,8 @@
 # Environment variables (NUNCA subir claves)
 .env
 .streamlit/secrets.toml
+*.env
+**/secrets.toml
 
 # Python
 __pycache__/

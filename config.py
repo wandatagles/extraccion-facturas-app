@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
+# Intentar importar streamlit para usar secrets en Streamlit Cloud
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
 # Configurar logging
 logging.basicConfig(
     level=logging.INFO,
@@ -29,17 +36,29 @@ class Config:
         # Cargar variables de entorno
         load_dotenv()
         
+        # Función helper para obtener variables de entorno con soporte para Streamlit Cloud
+        def get_env_var(key: str, default: str = None) -> str:
+            """Obtiene variable de entorno con soporte para st.secrets y .env"""
+            # Primero intentar st.secrets (Streamlit Cloud)
+            if STREAMLIT_AVAILABLE:
+                try:
+                    return st.secrets.get(key, os.getenv(key, default))
+                except:
+                    pass
+            # Fallback a variables de entorno normales
+            return os.getenv(key, default)
+        
         # API Keys - Revisar múltiples nombres de variables
         self.llmwhisperer_api_key = (
-            os.getenv("LLMWHISPERER_API_KEY") or 
-            os.getenv("WHISPERER_API_KEY") or
-            os.getenv("LLM_WHISPERER_API_KEY")
+            get_env_var("LLMWHISPERER_API_KEY") or 
+            get_env_var("WHISPERER_API_KEY") or
+            get_env_var("LLM_WHISPERER_API_KEY")
         )
         self.whisperer_api_key = self.llmwhisperer_api_key  # Alias para compatibilidad
         self.llm_whisperer_api_key = self.llmwhisperer_api_key  # Otro alias para compatibilidad
         
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.openai_api_key = get_env_var("OPENAI_API_KEY")
+        self.openai_model = get_env_var("OPENAI_MODEL", "gpt-4o-mini")
         
         # Configuración de la aplicación
         self.app_name = "Extractor de Facturas"

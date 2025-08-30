@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sistema de agentes mejorado con resumen tabular
+Sistema de extracción de datos simplificado con OpenAI
 """
 
 import os
@@ -11,8 +11,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List
-from crewai import Agent, Task, Crew
-from langchain_openai import ChatOpenAI
+from openai import OpenAI
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class TableExtractionAgent:
     """
-    Agente especializado en extracción de tablas con resumen tabular
+    Agente especializado en extracción de tablas con OpenAI
     """
     
     def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
@@ -34,21 +33,8 @@ class TableExtractionAgent:
         self.api_key = api_key
         self.model = model
         
-        # Configurar LLM con parámetros optimizados para precisión
-        self.llm = ChatOpenAI(
-            api_key=api_key,
-            model=model,
-            temperature=0.0,  # Máxima consistencia
-            max_tokens=16000,  # Máximo soportado por gpt-4o-mini
-            request_timeout=180,  # Timeout más corto pero suficiente
-            max_retries=3  # Reintentos automáticos
-        )
-        
-        # Agente especializado en extracción de tablas
-        self.table_extractor = Agent(
-            role='Especialista en Extracción de Tablas',
-            goal='Extraer y estructurar datos de facturas desde texto ASCII',
-            backstory="""Eres un experto analista de documentos financieros especializado en facturas de servicios públicos.
+        # Configurar cliente OpenAI
+        self.client = OpenAI(api_key=api_key)
             Tu especialidad es identificar y extraer información estructurada de facturas de energía eléctrica,
             sin importar cómo esté formateada. Tienes experiencia interpretando tablas ASCII, números,
             fechas, códigos de cliente y toda la información relevante para el procesamiento automático
