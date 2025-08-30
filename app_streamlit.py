@@ -2,52 +2,46 @@
 # -*- coding: utf-8 -*-
 """
 🏭 EXTRACTOR DE FACTURAS ELÉCTRICAS PANAMEÑAS
-Aplicación web con Streamlit - SOLUCIÓN DEFINITIVA
-Funcionalidades: PDF Individual/Carpeta → LLM Whisperer → Agentes → Previsualizar → Excel
+Aplicación web simple y fácil de usar para procesamiento por lotes
 """
 
 import streamlit as st
 import os
 import tempfile
-import zipfile
 from pathlib import Path
-from typing import List, Dict, Any
 import pandas as pd
 from datetime import datetime
-import json
-import traceback
+import time
+import logging
+
+# Configurar logging
+logger = logging.getLogger(__name__)
+import logging
+
+# Configurar logging
+logger = logging.getLogger(__name__)
 
 # Importar módulos locales
 try:
-    from config import Config, get_pdf_files_from_directory
+    from config import Config
     from llm_whisperer_wrapper import LLMWhispererClient  
-    
-    # Intentar usar la versión simplificada primero (sin CrewAI)
-    try:
-        from agents_system_simple import SimpleTableExtractionAgent as TableExtractionAgent
-        st.success("✅ Módulos locales importados (versión simplificada sin CrewAI)")
-    except ImportError:
-        # Fallback a la versión con CrewAI si está disponible
-        from agents_system import TableExtractionAgent
-        st.success("✅ Módulos locales importados (versión con CrewAI)")
-        
+    from agents_system import TableExtractionAgent
 except Exception as e:
-    st.error(f"❌ Error importando módulos: {e}")
+    st.error(f"Error cargando el sistema: {e}")
     st.stop()
 
 # Configuración de la página
 st.set_page_config(
-    page_title="🏭 Extractor de Facturas Eléctricas",
+    page_title="🏭 Extractor de Facturas",
     page_icon="🏭",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 # Variables de sesión
 if 'extracted_data' not in st.session_state:
     st.session_state.extracted_data = {}
-if 'processing_status' not in st.session_state:
-    st.session_state.processing_status = {}
+if 'batch_results' not in st.session_state:
+    st.session_state.batch_results = []
 if 'config' not in st.session_state:
     st.session_state.config = None
 if 'whisperer_client' not in st.session_state:
@@ -56,7 +50,7 @@ if 'extraction_agent' not in st.session_state:
     st.session_state.extraction_agent = None
 
 def initialize_services():
-    """Inicializar servicios de configuración"""
+    """Inicializar servicios"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -64,14 +58,13 @@ def initialize_services():
         config = Config()
         
         if not config.openai_api_key:
-            st.error("❌ OPENAI_API_KEY no encontrada en archivo .env")
-            st.info("Crea un archivo .env con: OPENAI_API_KEY=tu_clave_aqui")
+            st.error("❌ Falta configuración de OpenAI")
+            st.info("Configure su clave API de OpenAI en .env o secretos de Streamlit")
             return False
         
-        # Inicializar servicios
         if not config.llm_whisperer_api_key:
-            st.error("❌ LLM_WHISPERER_API_KEY no encontrada en archivo .env")
-            st.info("Agrega a tu archivo .env: LLM_WHISPERER_API_KEY=tu_clave_llm_whisperer")
+            st.error("❌ Falta configuración de LLM Whisperer")
+            st.info("Configure su clave API de LLM Whisperer en .env o secretos de Streamlit")
             return False
             
         whisperer_client = LLMWhispererClient(config.llm_whisperer_api_key)
@@ -89,259 +82,346 @@ def initialize_services():
         return False
 
 def process_single_pdf(pdf_file, file_name: str):
-    """Procesar un solo PDF con feedback detallado"""
+    """Procesar un PDF individual con optimización de memoria"""
+    temp_path = None
+    excel_filename = None
     
-    status_container = st.container()
-    
-    with status_container:
+    try:
         # Crear archivo temporal
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            pdf_file.seek(0)  # Asegurar que estamos al inicio del archivo
+            pdf_file.seek(0)
             temp_file.write(pdf_file.read())
             temp_path = temp_file.name
         
-        try:
-            # Paso 1: Extraer texto con LLM Whisperer
-            st.info(f"🔄 **Paso 1/3**: Extrayendo texto de {file_name} con LLM Whisperer...")
-            
-            if not st.session_state.whisperer_client:
-                st.error("❌ Cliente LLM Whisperer no disponible")
-                return None
-            
-            extracted_text = st.session_state.whisperer_client.extract_text_from_pdf(temp_path)
-            
-            if not extracted_text or len(extracted_text.strip()) < 50:
-                st.error(f"❌ Error: No se pudo extraer texto válido de {file_name}")
-                st.error("💡 Verifica que el PDF contenga texto legible y no esté corrupto")
-                return None
-                
-            st.success(f"✅ **Paso 1 completado**: Extraídos {len(extracted_text)} caracteres de texto")
-            
-            # Mostrar preview del texto extraído
-            with st.expander("👁️ Vista previa del texto extraído"):
-                st.text_area("Primeros 500 caracteres:", extracted_text[:500], height=100, disabled=True)
-            
-            # Paso 2: Procesar con agentes
-            st.info(f"🤖 **Paso 2/3**: Procesando con agentes de IA...")
-            
-            if not st.session_state.extraction_agent:
-                st.error("❌ Agente de extracción no disponible")
-                return None
-            
-            # Crear nombre de archivo temporal para Excel
-            excel_filename = f"temp_{file_name.replace('.pdf', '')}.xlsx"
-            
-            success = st.session_state.extraction_agent.process_invoice_text(extracted_text, excel_filename)
-            
-            if success and os.path.exists(excel_filename):
-                st.success(f"✅ **Paso 2 completado**: Datos procesados por IA")
-                
-                # Paso 3: Cargar y estructurar datos
-                st.info(f"📊 **Paso 3/3**: Estructurando datos finales...")
-                
-                try:
-                    # Leer datos del Excel generado
-                    df = pd.read_excel(excel_filename)
-                    
-                    # Limpiar archivo temporal de Excel
-                    os.unlink(excel_filename)
-                    
-                    st.success(f"✅ **Procesamiento completado exitosamente para {file_name}**")
-                    st.success(f"📊 Extraídas {len(df)} filas con {len(df.columns)} columnas")
-                    
-                    # Mostrar preview de los datos
-                    with st.expander("👁️ Vista previa de datos estructurados"):
-                        st.dataframe(df.head(), use_container_width=True)
-                    
-                    return {
-                        'filename': file_name,
-                        'extracted_text': extracted_text,
-                        'structured_data': df,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'rows_extracted': len(df),
-                        'columns_extracted': len(df.columns)
-                    }
-                    
-                except Exception as e:
-                    st.error(f"❌ Error leyendo datos del Excel: {e}")
-                    return None
-                    
-            else:
-                st.error(f"❌ Error: Los agentes no pudieron procesar {file_name}")
-                st.error("💡 Verifica la configuración de OpenAI y que el texto contenga información de factura válida")
-                return None
-                
-        except Exception as e:
-            st.error(f"❌ Error inesperado procesando {file_name}: {e}")
-            st.error(f"🔧 Detalles técnicos: {traceback.format_exc()}")
+        # Extraer texto con validación mejorada
+        extracted_text = st.session_state.whisperer_client.extract_text_from_pdf(temp_path)
+        
+        if not extracted_text or len(extracted_text.strip()) < 50:
             return None
-        finally:
-            # Limpiar archivo temporal PDF
-            if os.path.exists(temp_path):
+        
+        # Procesar con agentes
+        excel_filename = f"temp_{file_name.replace('.pdf', '').replace(' ', '_')}.xlsx"
+        success = st.session_state.extraction_agent.process_invoice_text(extracted_text, excel_filename)
+        
+        if success and os.path.exists(excel_filename):
+            # Leer datos del Excel
+            df = pd.read_excel(excel_filename)
+            
+            # Crear resultado
+            result = {
+                'filename': file_name,
+                'extracted_text': extracted_text[:2000],  # Limitar texto para memoria
+                'structured_data': df,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'rows_extracted': len(df),
+                'columns_extracted': len(df.columns)
+            }
+            
+            # Limpiar inmediatamente
+            del extracted_text  # Liberar memoria del texto
+            
+            return result
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error procesando {file_name}: {str(e)}")
+        return None
+    finally:
+        # Limpiar archivos temporales siempre
+        if temp_path and os.path.exists(temp_path):
+            try:
                 os.unlink(temp_path)
+            except:
+                pass
+        if excel_filename and os.path.exists(excel_filename):
+            try:
+                os.unlink(excel_filename)
+            except:
+                pass
+
+def process_batch_pdfs(uploaded_files, batch_size=5):
+    """Procesar PDFs en lotes con máxima calidad y estabilidad"""
+    
+    total_files = len(uploaded_files)
+    success_count = 0
+    error_count = 0
+    
+    # Mostrar progreso
+    st.subheader(f"🔄 Procesando {total_files} facturas con máxima precisión...")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Contenedor para mostrar archivos procesados en tiempo real
+    results_container = st.empty()
+    
+    # Limpiar resultados anteriores del lote
+    st.session_state.batch_results = []
+    
+    # Procesar archivos en lotes pequeños para máxima estabilidad
+    for batch_start in range(0, total_files, batch_size):
+        batch_end = min(batch_start + batch_size, total_files)
+        current_batch = uploaded_files[batch_start:batch_end]
+        
+        lote_num = batch_start // batch_size + 1
+        total_lotes = (total_files - 1) // batch_size + 1
+        
+        status_text.text(f"📦 Procesando lote {lote_num} de {total_lotes} (Calidad Máxima)")
+        
+        for i, uploaded_file in enumerate(current_batch):
+            current_file_index = batch_start + i + 1
+            
+            # Actualizar progreso
+            progress = current_file_index / total_files
+            progress_bar.progress(progress)
+            status_text.text(f"📄 Archivo {current_file_index}/{total_files}: {uploaded_file.name}")
+            
+            # Procesar archivo con reintentos
+            max_retries = 2
+            result = None
+            
+            for retry in range(max_retries + 1):
+                try:
+                    if retry > 0:
+                        status_text.text(f"🔄 Reintentando archivo {current_file_index}/{total_files}: {uploaded_file.name} (Intento {retry + 1})")
+                        time.sleep(retry * 2)  # Delay progresivo
+                    
+                    result = process_single_pdf(uploaded_file, uploaded_file.name)
+                    
+                    if result:
+                        break  # Éxito, salir del loop de reintentos
+                        
+                except Exception as e:
+                    if retry == max_retries:
+                        logger.error(f"Error final procesando {uploaded_file.name}: {str(e)}")
+            
+            # Registrar resultado
+            if result:
+                st.session_state.extracted_data[uploaded_file.name] = result
+                st.session_state.batch_results.append({
+                    'archivo': uploaded_file.name,
+                    'estado': 'Exitoso ✅',
+                    'filas_extraidas': result['rows_extracted'],
+                    'fecha': result['timestamp']
+                })
+                success_count += 1
+            else:
+                st.session_state.batch_results.append({
+                    'archivo': uploaded_file.name,
+                    'estado': 'Error ❌',
+                    'filas_extraidas': 0,
+                    'fecha': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                error_count += 1
+            
+            # Mostrar progreso en tiempo real
+            if st.session_state.batch_results:
+                with results_container.container():
+                    st.markdown("### 📊 Progreso en Tiempo Real")
+                    recent_results = st.session_state.batch_results[-5:]  # Últimos 5
+                    for result in recent_results:
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        with col1:
+                            st.text(f"• {result['archivo']}")
+                        with col2:
+                            st.text(result['estado'])
+                        with col3:
+                            st.text(f"{result['filas_extraidas']} filas")
+            
+            # Delay inteligente entre archivos (mayor estabilidad)
+            if current_file_index < total_files:
+                time.sleep(1.5)  # Aumentado para mayor estabilidad
+        
+        # Delay entre lotes para estabilidad de APIs
+        if batch_end < total_files:
+            status_text.text(f"⏸️ Pausa entre lotes para optimizar calidad...")
+            time.sleep(3)  # Pausa más larga entre lotes
+    
+    # Completar progreso
+    progress_bar.progress(1.0)
+    status_text.text("✅ Procesamiento completado con máxima calidad")
+    
+    return success_count, error_count
 
 def main():
-    """Función principal de la aplicación"""
+    """Función principal - Interfaz simple"""
     
-    # Verificar que estamos ejecutando correctamente
-    st.write("🔄 Iniciando aplicación...")
+    # Título
+    st.title("🏭 Extractor de Facturas Eléctricas")
+    st.markdown("**Sistema automatizado para procesar facturas PDF**")
     
-    # Título principal
-    st.title("🏭 EXTRACTOR DE FACTURAS ELÉCTRICAS PANAMEÑAS")
-    st.markdown("**Sistema automatizado con LLM Whisperer + CrewAI + OpenAI**")
-    st.markdown("---")
+    # Inicializar servicios
+    if not st.session_state.config:
+        with st.spinner("⚙️ Configurando sistema..."):
+            if not initialize_services():
+                st.stop()
+        st.success("✅ Sistema listo para usar")
     
-    # Mensaje de bienvenida
-    st.success("✅ Aplicación cargada correctamente")
-    
-    # Sidebar con configuración
-    with st.sidebar:
-        st.header("⚙️ Configuración")
-        
-        if st.button("🔄 Reinicializar Servicios"):
-            st.session_state.config = None
-            st.session_state.whisperer_client = None
-            st.session_state.extraction_agent = None
-            st.rerun()
-        
-        # Verificar configuración
-        if not st.session_state.config:
-            with st.spinner("Inicializando servicios..."):
-                if initialize_services():
-                    st.success("✅ Servicios inicializados")
-                else:
-                    st.error("❌ Error en configuración")
-                    st.stop()
-        else:
-            st.success("✅ Servicios listos")
-        
-        st.markdown("---")
-        st.markdown("**📊 Estado de Procesamiento**")
-        
-        total_processed = len(st.session_state.extracted_data)
-        st.metric("Archivos procesados", total_processed)
-        
-        if total_processed > 0:
-            if st.button("🗑️ Limpiar Resultados"):
-                st.session_state.extracted_data = {}
-                st.rerun()
-    
-    # Pestañas principales
-    tab1, tab2, tab3 = st.tabs(["📄 Procesar PDFs", "📊 Resultados", "📥 Exportar"])
+    # Crear pestañas principales
+    tab1, tab2, tab3 = st.tabs(["📄 Procesar Facturas", "📊 Ver Resultados", "📥 Exportar"])
     
     with tab1:
-        st.header("📄 Subir y Procesar Facturas PDF")
+        st.header("📄 Subir y Procesar Facturas")
         
-        st.info("💡 **Flujo de procesamiento**: PDF → LLM Whisperer (extracción texto) → Agentes IA (análisis) → Excel estructurado")
+        # Mostrar información del sistema
+        if st.session_state.extracted_data:
+            st.success(f"📊 {len(st.session_state.extracted_data)} facturas ya procesadas")
         
-        # Opciones de subida
+        st.markdown("---")
+        
+        # Opciones de carga
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📄 PDF Individual")
-            
-            uploaded_file = st.file_uploader(
-                "Selecciona un archivo PDF",
+            st.subheader("📄 Una Factura")
+            single_file = st.file_uploader(
+                "Seleccione un archivo PDF:",
                 type=['pdf'],
-                key="single_pdf",
-                help="Arrastra y suelta tu factura PDF aquí"
+                key="single_upload",
+                help="Arrastre y suelte su factura aquí"
             )
             
-            if uploaded_file is not None:
-                st.info(f"📄 Archivo: {uploaded_file.name}")
-                st.info(f"📏 Tamaño: {uploaded_file.size:,} bytes")
+            if single_file:
+                st.info(f"📄 **{single_file.name}** ({single_file.size:,} bytes)")
                 
-                if st.button("🚀 Procesar PDF Individual", type="primary"):
-                    with st.spinner("Procesando..."):
-                        result = process_single_pdf(uploaded_file, uploaded_file.name)
+                if st.button("🔄 Procesar Factura", key="process_single", type="primary"):
+                    with st.spinner("Procesando factura..."):
+                        result = process_single_pdf(single_file, single_file.name)
+                        
                         if result:
-                            st.session_state.extracted_data[uploaded_file.name] = result
-                            st.success(f"✅ {uploaded_file.name} procesado exitosamente")
+                            st.session_state.extracted_data[single_file.name] = result
+                            st.success(f"✅ ¡Factura procesada exitosamente!")
+                            st.success(f"📊 Se extrajeron **{result['rows_extracted']} filas** de datos")
                             st.balloons()
-                            st.rerun()
+                        else:
+                            st.error("❌ No se pudo procesar la factura")
+                            st.error("💡 Verifique que el PDF contenga una factura válida")
         
         with col2:
-            st.subheader("📁 Múltiples PDFs")
-            
-            uploaded_files = st.file_uploader(
-                "Selecciona múltiples archivos PDF",
+            st.subheader("📁 Múltiples Facturas")
+            multiple_files = st.file_uploader(
+                "Seleccione múltiples archivos PDF:",
                 type=['pdf'],
                 accept_multiple_files=True,
-                key="multiple_pdfs",
-                help="Puedes seleccionar varios PDFs a la vez"
+                key="multiple_upload",
+                help="Puede seleccionar hasta 100 archivos"
             )
             
-            if uploaded_files:
-                st.info(f"📁 {len(uploaded_files)} archivos seleccionados")
-                for file in uploaded_files:
-                    st.text(f"• {file.name} ({file.size:,} bytes)")
+            if multiple_files:
+                num_files = len(multiple_files)
+                st.success(f"📄 **{num_files} archivos** seleccionados")
                 
-                if st.button("🚀 Procesar Todos los PDFs", type="primary"):
+                # Mostrar lista de archivos (primeros 5)
+                with st.expander(f"👁️ Ver archivos ({min(5, num_files)} de {num_files})"):
+                    for i, file in enumerate(multiple_files[:5]):
+                        st.text(f"• {file.name}")
+                    if num_files > 5:
+                        st.text(f"... y {num_files - 5} archivos más")
+                
+                # Configuración optimizada para calidad máxima
+                col_config1, col_config2 = st.columns(2)
+                with col_config1:
+                    batch_size = st.selectbox(
+                        "Procesar en grupos de:",
+                        [3, 5, 8],  # Lotes más pequeños para máxima estabilidad
+                        index=1,  # Default = 5
+                        help="Grupos pequeños = Mayor estabilidad y calidad"
+                    )
+                
+                with col_config2:
+                    st.info(f"⏱️ Tiempo estimado: {num_files * 4} segundos")
+                    st.success("🎯 Configurado para máxima precisión")
+                
+                if st.button("🔄 Procesar Todas las Facturas", key="process_batch", type="primary"):
+                    # Procesar archivos
+                    success_count, error_count = process_batch_pdfs(multiple_files, batch_size)
                     
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                    # Mostrar resumen
+                    st.markdown("---")
+                    st.subheader("📊 Resumen del Procesamiento")
                     
-                    success_count = 0
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("📄 Total", num_files)
+                    with col2:
+                        st.metric("✅ Exitosos", success_count)
+                    with col3:
+                        st.metric("❌ Con errores", error_count)
                     
-                    for i, file in enumerate(uploaded_files):
-                        status_text.text(f"Procesando {i+1}/{len(uploaded_files)}: {file.name}")
+                    if success_count > 0:
+                        st.success(f"🎉 **{success_count} facturas procesadas exitosamente**")
+                    
+                    if error_count > 0:
+                        st.warning(f"⚠️ **{error_count} facturas tuvieron errores**")
+                    
+                    # Mostrar resultados detallados
+                    if st.session_state.batch_results:
+                        st.subheader("📋 Resultados Detallados")
+                        results_df = pd.DataFrame(st.session_state.batch_results)
+                        st.dataframe(results_df, use_container_width=True)
                         
-                        result = process_single_pdf(file, file.name)
-                        if result:
-                            st.session_state.extracted_data[file.name] = result
-                            success_count += 1
-                        
-                        progress_bar.progress((i + 1) / len(uploaded_files))
-                    
-                    status_text.success(f"✅ Procesamiento completado: {success_count}/{len(uploaded_files)} archivos exitosos")
-                    st.balloons()
-                    st.rerun()
+                        # Opción para guardar reporte
+                        if st.button("💾 Guardar Reporte de Procesamiento"):
+                            report_filename = f"reporte_procesamiento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                            results_df.to_excel(report_filename, index=False)
+                            st.success(f"✅ Reporte guardado: {report_filename}")
     
     with tab2:
-        st.header("📊 Resultados del Procesamiento")
+        st.header("📊 Facturas Procesadas")
         
         if not st.session_state.extracted_data:
-            st.info("📭 No hay resultados aún. Procesa algunos PDFs en la pestaña anterior.")
-            st.info("💡 El flujo es: Subir PDF → Procesar → Ver resultados aquí")
+            st.info("📭 No hay facturas procesadas aún")
+            st.info("💡 Use la pestaña **'Procesar Facturas'** para subir y procesar archivos")
         else:
-            # Lista de archivos procesados
-            st.subheader("📋 Archivos Procesados")
+            st.success(f"📄 **{len(st.session_state.extracted_data)} facturas** procesadas")
             
+            # Botón para limpiar resultados
+            if st.button("🗑️ Limpiar Todos los Resultados", type="secondary"):
+                st.session_state.extracted_data = {}
+                st.session_state.batch_results = []
+                st.success("✅ Resultados limpiados")
+                st.rerun()
+            
+            st.markdown("---")
+            
+            # Selector de archivo
             selected_file = st.selectbox(
-                "Selecciona un archivo para ver detalles:",
-                list(st.session_state.extracted_data.keys())
+                "Seleccione una factura para ver:",
+                list(st.session_state.extracted_data.keys()),
+                help="Puede ver los datos extraídos de cada factura"
             )
             
             if selected_file:
                 data = st.session_state.extracted_data[selected_file]
                 
-                col1, col2 = st.columns([1, 1])
-                
+                # Información básica
+                col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("📄 Archivo", selected_file)
-                    st.metric("🕐 Procesado", data['timestamp'])
-                
+                    st.metric("📄 Archivo", selected_file.split('.')[0])
                 with col2:
-                    if isinstance(data['structured_data'], pd.DataFrame):
-                        st.metric("📊 Filas extraídas", len(data['structured_data']))
-                        st.metric("📋 Columnas", len(data['structured_data'].columns))
+                    st.metric("📊 Filas extraídas", data['rows_extracted'])
+                with col3:
+                    st.metric("📋 Columnas", data['columns_extracted'])
                 
-                # Pestañas de detalles
-                detail_tab1, detail_tab2 = st.tabs(["📊 Datos Estructurados", "📄 Texto Extraído"])
+                # Mostrar datos extraídos
+                st.subheader("📊 Datos Extraídos")
+                if isinstance(data['structured_data'], pd.DataFrame):
+                    st.dataframe(data['structured_data'], use_container_width=True)
+                    
+                    # Estadísticas adicionales
+                    st.info(f"📅 Procesado el {data['timestamp']}")
                 
-                with detail_tab1:
-                    st.subheader("📊 Datos Estructurados")
-                    if isinstance(data['structured_data'], pd.DataFrame):
-                        st.dataframe(data['structured_data'], use_container_width=True)
-                    else:
-                        st.text(str(data['structured_data']))
-                
-                with detail_tab2:
-                    st.subheader("📄 Texto Extraído por LLM Whisperer")
+                # Opción para ver texto original
+                with st.expander("📄 Ver texto extraído del PDF (avanzado)"):
+                    # Mostrar solo los primeros 1000 caracteres para no sobrecargar
+                    text_preview = data['extracted_text'][:1000]
+                    if len(data['extracted_text']) > 1000:
+                        text_preview += "\n\n... (texto truncado para visualización)"
+                    
                     st.text_area(
-                        "Contenido ASCII:",
-                        data['extracted_text'],
-                        height=400,
+                        "Contenido extraído:",
+                        text_preview,
+                        height=200,
                         disabled=True
                     )
     
@@ -349,48 +429,66 @@ def main():
         st.header("📥 Exportar Resultados")
         
         if not st.session_state.extracted_data:
-            st.info("📭 No hay datos para exportar. Procesa algunos PDFs primero.")
-            st.info("💡 Después de procesar PDFs, podrás exportar los resultados a Excel aquí")
+            st.info("📭 No hay datos para exportar")
+            st.info("💡 Primero procese algunas facturas")
         else:
-            st.subheader("📊 Opciones de Exportación")
+            st.success(f"📄 Listo para exportar **{len(st.session_state.extracted_data)} facturas**")
             
-            # Seleccionar archivos para exportar
+            # Seleccionar archivos
             files_to_export = st.multiselect(
-                "Selecciona archivos para exportar:",
+                "Seleccione facturas para exportar:",
                 list(st.session_state.extracted_data.keys()),
-                default=list(st.session_state.extracted_data.keys())
+                default=list(st.session_state.extracted_data.keys()),
+                help="Puede exportar todas o solo algunas facturas"
             )
             
             if files_to_export:
+                st.info(f"📊 Se exportarán **{len(files_to_export)} facturas**")
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    if st.button("📊 Exportar Excel Individual", type="primary"):
+                    st.subheader("📄 Archivos Separados")
+                    st.markdown("*Un archivo Excel por cada factura*")
+                    
+                    if st.button("📊 Crear Archivos Individuales", type="primary"):
+                        created_files = []
+                        
                         for filename in files_to_export:
                             data = st.session_state.extracted_data[filename]
                             
                             if isinstance(data['structured_data'], pd.DataFrame):
-                                # Crear nombre de archivo de salida
-                                output_name = f"{Path(filename).stem}_extraido.xlsx"
+                                # Crear nombre limpio para el archivo
+                                clean_name = filename.replace('.pdf', '').replace(' ', '_')
+                                output_name = f"{clean_name}_datos.xlsx"
                                 
                                 # Guardar Excel
                                 data['structured_data'].to_excel(output_name, index=False)
-                                
-                                st.success(f"✅ {output_name} guardado")
-                                
-                                # Opción de descarga
-                                with open(output_name, 'rb') as file:
-                                    st.download_button(
-                                        label=f"⬇️ Descargar {output_name}",
-                                        data=file.read(),
-                                        file_name=output_name,
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    )
+                                created_files.append(output_name)
+                        
+                        if created_files:
+                            st.success(f"✅ **{len(created_files)} archivos** creados exitosamente")
+                            
+                            # Mostrar archivos con botones de descarga
+                            for file in created_files:
+                                col_file1, col_file2 = st.columns([3, 1])
+                                with col_file1:
+                                    st.text(f"• {file}")
+                                with col_file2:
+                                    with open(file, 'rb') as f:
+                                        st.download_button(
+                                            label="⬇️",
+                                            data=f.read(),
+                                            file_name=file,
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key=f"download_{file}"
+                                        )
                 
                 with col2:
-                    if st.button("📋 Exportar Excel Consolidado", type="secondary"):
-                        # Consolidar todos los datos
+                    st.subheader("📋 Archivo Consolidado")
+                    st.markdown("*Todas las facturas en un solo archivo*")
+                    
+                    if st.button("📊 Crear Archivo Consolidado", type="secondary"):
                         all_data = []
                         
                         for filename in files_to_export:
@@ -407,32 +505,26 @@ def main():
                             output_name = f"facturas_consolidadas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                             
                             consolidated_df.to_excel(output_name, index=False)
-                            st.success(f"✅ {output_name} guardado")
+                            st.success(f"✅ **Archivo consolidado creado**: {output_name}")
                             
-                            # Mostrar preview
-                            st.subheader("📊 Preview Consolidado")
-                            st.dataframe(consolidated_df, use_container_width=True)
+                            # Mostrar estadísticas
+                            st.info(f"📊 **{len(consolidated_df)} filas** de **{len(files_to_export)} facturas**")
                             
-                            # Opción de descarga
+                            # Botón de descarga
                             with open(output_name, 'rb') as file:
                                 st.download_button(
                                     label=f"⬇️ Descargar {output_name}",
                                     data=file.read(),
                                     file_name=output_name,
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    type="primary"
                                 )
-
-    # Footer
-    st.markdown("---")
-    st.markdown("**🏭 Extractor de Facturas Eléctricas Panameñas** | Powered by LLM Whisperer + CrewAI + OpenAI")
-    
-    # Información de debug
-    with st.expander("🔧 Información de Debug"):
-        st.write("**Estado de la sesión:**")
-        st.write(f"- Archivos procesados: {len(st.session_state.extracted_data)}")
-        st.write(f"- Configuración cargada: {st.session_state.config is not None}")
-        st.write(f"- Whisperer disponible: {st.session_state.whisperer_client is not None}")
-        st.write(f"- Agente disponible: {st.session_state.extraction_agent is not None}")
+                            
+                            # Mostrar preview pequeño
+                            with st.expander("👁️ Vista Previa del Archivo Consolidado"):
+                                st.dataframe(consolidated_df.head(10), use_container_width=True)
+                                if len(consolidated_df) > 10:
+                                    st.info(f"... y {len(consolidated_df) - 10} filas más en el archivo")
 
 if __name__ == "__main__":
     main()
