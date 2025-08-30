@@ -34,12 +34,14 @@ class TableExtractionAgent:
         self.api_key = api_key
         self.model = model
         
-        # Configurar LLM
+        # Configurar LLM con parámetros optimizados para precisión
         self.llm = ChatOpenAI(
             api_key=api_key,
             model=model,
-            temperature=0.1,
-            max_tokens=16000
+            temperature=0.0,  # Máxima consistencia
+            max_tokens=16000,  # Máximo soportado por gpt-4o-mini
+            request_timeout=180,  # Timeout más corto pero suficiente
+            max_retries=3  # Reintentos automáticos
         )
         
         # Agente especializado en extracción de tablas
@@ -68,7 +70,7 @@ class TableExtractionAgent:
         """
         logger.info("Iniciando extracción MEJORADA de tablas con agentes")
         
-        # PROMPT MEJORADO - MÁS ESPECÍFICO PARA TODOS LOS CAMPOS
+        # PROMPT MEJORADO - MÁS ESPECÍFICO PARA TODOS LOS CAMPOS CON CORRECCIÓN DE TOTALES
         prompt_mejorado = f"""
 Analiza LÍNEA POR LÍNEA esta factura de energía eléctrica de Panamá y extrae TODOS los datos disponibles:
 
@@ -94,20 +96,35 @@ INSTRUCCIONES ESPECÍFICAS - BUSCA CADA CAMPO:
    - Transmisión: Busca "Transmisión" y su valor en B/.
    - Distribución: Busca "Distribución" y su valor en B/.
 
-5. OTROS DETALLES IMPORTANTES:
+5. CAMPO SECTOR:
+   - SECTOR: Busca "Sector" o campo que indica clasificación como "Residencial", "No Residencial", "Comercial", "Industrial"
+   - Si ves "No Residencial" → va en campo "sector"
+   - Si ves "Residencial" → va en campo "sector"
+
+6. OTROS DETALLES IMPORTANTES:
    - Variación por Combustible: Busca "Combustible" y valor
    - Compensación por Incumplimiento: Busca "Compensación" o "Incumplimiento"
    - Demandas por tipo (Punta, Fuera Punta, etc.)
    - Energía por franjas horarias
 
-6. HISTÓRICO COMPLETO:
+7. HISTÓRICO COMPLETO:
    - Extrae TODOS los meses mostrados con kWh e importes
    - No omitas ningún mes que aparezca en la tabla
+
+8. ⚠️ TOTALES - DIFERENCIA CRÍTICA:
+   - "TOTAL ESTE MES" o "Total Este Mes": Es el total SOLO de este período de facturación
+   - "GRAN TOTAL" o "Gran Total": Es el total INCLUYENDO saldos pendientes anteriores
+   - Busca específicamente cada campo en su ubicación en la factura
+   - Extrae el valor que aparece junto a "TOTAL ESTE MES" para "total_mes"
+   - Extrae el valor que aparece junto a "GRAN TOTAL" para "gran_total"
+   - Si ambos campos muestran el mismo valor en la factura, está bien que coincidan
+   - AMBOS campos SIEMPRE deben estar presentes y extraídos correctamente
 
 REGLAS CRÍTICAS:
 - SI VES UN VALOR EN LA FACTURA, EXTRÁELO (no pongas 0)
 - Convierte correctamente las comas decimales y de miles
 - Busca valores en TODA la factura, no solo en una sección
+- Extrae cada campo desde su ubicación específica, no copies valores entre campos
 
 RESPONDE SOLO CON ESTE JSON (sin texto adicional):"""
         
@@ -211,7 +228,7 @@ RESPONDE SOLO CON ESTE JSON (sin texto adicional):"""
   },
   "totales": {
     "total_mes": 1549.19,
-    "gran_total": 1549.19,
+    "gran_total": 1551.27,
     "saldo_anterior": 0,
     "saldo_corte": 0
   },
@@ -223,7 +240,7 @@ RESPONDE SOLO CON ESTE JSON (sin texto adicional):"""
     "periodo_lectura_desde": "",
     "periodo_lectura_hasta": "",
     "tipo_lectura": "",
-    "tipo_consumo": "",
+    "sector": "",
     "total_mes": 1549.19,
     "gran_total": 1549.19,
     "historico_consumo_kwh": 5280,
@@ -257,7 +274,11 @@ RESPONDE SOLO CON ESTE JSON (sin texto adicional):"""
   }
 }
 
-IMPORTANTE: Busca valores específicos en la factura para CADA campo. Si ves números o importes, extráelos correctamente.""",
+IMPORTANTE: Busca valores específicos en la factura para CADA campo. Si ves números o importes, extráelos correctamente.
+
+⚠️ RECORDATORIO CRÍTICO PARA SECTOR:
+- Si encuentras "Residencial", "No Residencial", "Comercial", "Industrial" → va en campo "sector"
+- Extrae el valor del sector desde su ubicación específica en la factura""",
             agent=self.table_extractor,
             expected_output="JSON estructurado con TODOS los datos reales de la factura (sin ceros falsos) incluyendo resumen_tabular"
         )
@@ -291,11 +312,10 @@ IMPORTANTE: Busca valores específicos en la factura para CADA campo. Si ves nú
                 
         except json.JSONDecodeError as e:
             logger.error(f"Error parseando JSON del agente: {e}")
-            # Fallback: crear estructura básica
-            return self._create_fallback_structure(ascii_text)
+            return None  # Devolver None en lugar de fallback
         except Exception as e:
             logger.error(f"Error en extracción de tablas: {e}")
-            return self._create_fallback_structure(ascii_text)
+            return None  # Devolver None en lugar de fallback
     
     def _create_fallback_structure(self, text: str) -> Dict[str, Any]:
         """Crea una estructura básica en caso de error"""
@@ -322,6 +342,12 @@ IMPORTANTE: Busca valores específicos en la factura para CADA campo. Si ves nú
             
             # Extraer datos estructurados
             extracted_data = self.extract_tables_from_text(ascii_text)
+            
+            # Verificar si la extracción fue exitosa
+            if extracted_data is None:
+                logger.error("La extracción de datos falló - no se pudo procesar la factura")
+                return False
+                
             logger.info("Extracción completada exitosamente")
             
             # Crear Excel con una sola hoja consolidada
@@ -408,7 +434,7 @@ IMPORTANTE: Busca valores específicos en la factura para CADA campo. Si ves nú
                 'Periodo de lectura desde': resumen_tabular.get('periodo_lectura_desde') or periodo.get('fecha_desde', ''),
                 'Periodo de lectura hasta': resumen_tabular.get('periodo_lectura_hasta') or periodo.get('fecha_hasta', ''),
                 'Tipo de lectura': resumen_tabular.get('tipo_lectura') or datos_factura.get('tipo_lectura', ''),
-                'Tipo de consumo': resumen_tabular.get('tipo_consumo', ''),
+                'Sector': resumen_tabular.get('sector') or datos_factura.get('sector', ''),
                 'Total del mes': resumen_tabular.get('total_mes') or totales.get('total_mes', 0),
                 'Gran total': resumen_tabular.get('gran_total') or totales.get('gran_total', 0),
                 'Saldo anterior': totales.get('saldo_anterior', 0),

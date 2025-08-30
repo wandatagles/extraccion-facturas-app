@@ -107,11 +107,12 @@ class LLMWhispererClient:
             logger.info(f"🔄 Iniciando conversión de PDF: {pdf_path.name}")
 
             # Usar el método whisper del cliente oficial en modo síncrono
-            # Configurar para generar formato ASCII art con tablas
+            # Usar el método whisper del cliente oficial en modo síncrono
+            # Configurar para generar formato ASCII art con tablas - OPTIMIZADO
             result = self.client.whisper(
                 file_path=str(pdf_path),
                 wait_for_completion=True,
-                wait_timeout=300,  # 5 minutos
+                wait_timeout=180,  # 3 minutos - más eficiente
                 mode="form",  # Modo específico para tablas estructuradas
                 output_mode="layout_preserving",  # Preservar layout
                 mark_vertical_lines=True,  # Marcar líneas verticales
